@@ -37,7 +37,12 @@ from .core import TRIAGE_TOOL
 from .schema import TicketTriage
 from .server_tools import SERVER_TOOLS
 from .telemetry import log_step
-from .tools import ESCALATE_TOOL, LOOK_UP_CUSTOMER_TOOL, escalate_to_human, look_up_customer
+from .tools import (
+    ESCALATE_TOOL,
+    LOOK_UP_CUSTOMER_TOOL,
+    escalate_to_human,
+    look_up_customer,
+)
 
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
 MAX_STEPS = 6
