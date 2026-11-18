@@ -1,5 +1,5 @@
-"""Entry point for Week 8 Day 2: run the sample tickets through the routed graph with
-checkpointing enabled, printing state updates after each node.
+"""Entry point for Week 8 Day 3: stream custom events alongside node updates and observe
+high-priority tickets pausing on interrupt().
 
 Usage:
     uv run python run_graph.py
@@ -15,13 +15,6 @@ from scoutbot import build_ticket_graph, initial_state
 load_dotenv()
 
 TICKETS_PATH = Path(__file__).parent / "sample_tickets.json"
-WATCHED_FIELDS = ("customer", "triage", "outcome", "notes")
-
-
-def _print_fields(indent: str, data: dict, fields=WATCHED_FIELDS) -> None:
-    for field in fields:
-        if field in data:
-            print(f"{indent}{field}: {json.dumps(data[field])}")
 
 
 def main():
@@ -34,21 +27,17 @@ def main():
         state = initial_state(ticket["text"], ticket["customer_id"], ticket["id"])
         config = {"configurable": {"thread_id": ticket["id"]}}
 
-        first_snapshot = True
+        # Stream both "updates" and "custom" so custom progress events appear before each
+        # node's final state update chunk.
         for mode, chunk in graph.stream(
-            state, config=config, stream_mode=["updates", "values"]
+            state, config=config, stream_mode=["updates", "custom"]
         ):
-            if mode == "updates":
-                for node_name, update in chunk.items():
-                    print(f"  node {node_name!r} returned only:")
-                    _print_fields("      ", update)
-            else:
-                print(f"  {'starting state:' if first_snapshot else 'state is now:'}")
-                _print_fields("      ", chunk)
-                first_snapshot = False
+            print(f"  [{mode}] {json.dumps(chunk, default=str)}")
 
         snapshot = graph.get_state(config)
         print(f"  checkpoint next nodes: {snapshot.next}")
+        if snapshot.tasks and snapshot.tasks[0].interrupts:
+            print(f"  paused with interrupt payload: {snapshot.tasks[0].interrupts[0].value}")
         print()
 
 

@@ -1,42 +1,29 @@
-# ScoutBot (Week 8 Day 2 starting point)
+# ScoutBot
 
-This is Week 8 Day 1's reference solution: Week 7's ReAct loop, untouched, plus yesterday's
-two-node LangGraph graph with an explicit state schema. Everyone starts today from this same
-known-good baseline, regardless of how far you got yesterday. Nothing in here changes shape today,
-you're extending it.
+Support-ticket triage and escalation assistant built with Anthropic's SDK and LangGraph.
 
-- `src/scoutbot/graph.py` — yesterday's graph. `TicketState` declares what one run accumulates,
-  `look_up_customer_node` and `triage_ticket_node` each return only the fields they changed, and
-  `build_ticket_graph()` wires them `START → look_up_customer → triage_ticket → END`. Today you add
-  a branch after triage, and a checkpointer to `compile()`.
-- `run_graph.py` — yesterday's demo. Streams updates and values together, so each node's own return
-  value prints next to the merged state. Run it once before you start, to see where today begins.
-- `src/scoutbot/core.py` / `schema.py` / `tools.py` / `server_tools.py` / `telemetry.py` — Week 7's
-  triage logic, tools and step logger. Unchanged.
-- `src/scoutbot/loop.py` — Week 7's bounded ReAct loop. Still not today's subject, and still should
-  keep working when you're done. Worth one look, though: find where it escalates a ticket. It
-  happens because the *model* chose to call `escalate_to_human`, which is exactly the kind of
-  decision you're about to make explicit.
-- `mock_customers.json` / `sample_tickets.json` / `sample_app.log` — the same fake data as Week 7.
+## Overview
 
-**`langgraph` is already installed here** (it arrived yesterday). **The SQLite checkpointer is
-not**, and adding it is one of today's steps, on purpose, so the dependency lands in your own
-`pyproject.toml`.
+- `src/scoutbot/graph.py` — LangGraph `StateGraph` (`TicketState`) with:
+  - `look_up_customer → triage_ticket → (escalate_ticket | auto_resolve)`
+  - Injected `StreamWriter` (`writer: StreamWriter = _noop_writer`) emitting custom progress events before each node finishes
+  - Human-in-the-loop pause via `interrupt()` inside `escalate_ticket_node` for high-priority tickets, resumed with `Command(resume=...)`
+  - Optional checkpointer (`InMemorySaver` or file-backed `SqliteSaver`)
+- `src/scoutbot/core.py` / `schema.py` / `tools.py` / `server_tools.py` / `telemetry.py` — ticket triage logic, tool definitions, and JSONL step logger.
+- `src/scoutbot/loop.py` — Week 7 bounded ReAct agent loop (unchanged).
+- `run_graph.py` — runs sample tickets through the graph, streaming both `"updates"` and `"custom"` events and showing paused interrupt payloads.
+- `resume_demo.py` — demonstrates pausing a high-priority ticket in one process (`SqliteSaver`) and resuming it with a human answer in a separate Python process.
+- `main.py` — runs the ReAct loop (`loop.py`) over the sample tickets and summarizes telemetry logs.
+- `mock_customers.json` / `sample_tickets.json` / `sample_app.log` — sample data.
 
-**Your actual task is in [`../exercises.md`](../exercises.md)** — this folder is just the starting
-point, not the instructions.
+### Resume behavior note
+
+When a paused ticket is resumed with `Command(resume=...)`:
+- `look_up_customer` and `triage_ticket` **do not re-run** (their outputs are loaded from the checkpoint; `0` model calls occur on resume).
+- `escalate_ticket` **re-runs from the top of the node**, and `interrupt()` immediately returns the value passed to `Command(resume=...)`.
 
 ## Setup
 
 ```bash
-cp .env.example .env   # then fill in your real ANTHROPIC_API_KEY
-uv sync                # creates .venv/ and installs the locked dependencies, pytest included
-```
-
-## Run / test (as-is, before you change anything)
-
-```bash
-uv run python run_graph.py   # yesterday's graph, printing state after each node
-uv run python main.py        # Week 7's loop on all 5 sample tickets
-uv run pytest                # 37 tests should all pass, untouched
-```
+cp .env.example .env   # set your ANTHROPIC_API_KEY
+uv sync                # create .venv/ and install dependencies

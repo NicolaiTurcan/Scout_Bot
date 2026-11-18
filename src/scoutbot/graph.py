@@ -1,10 +1,10 @@
-"""ScoutBot's LangGraph workflow with conditional routing and optional checkpointing.
+"""ScoutBot's LangGraph workflow with streaming custom events, interrupts, and checkpointing.
 
-Extends W8D1's two-node graph (`look_up_customer` -> `triage_ticket`) with:
-- A pure router function (`route_after_triage`) that inspects `triage.priority` in state.
-- Two terminal nodes (`escalate_ticket` and `auto_resolve`) recording the final outcome.
-- Optional checkpointer injection in `build_ticket_graph(checkpointer=...)` so runs can
-  persist across process restarts via `SqliteSaver`.
+Extends W8D2's routed graph with:
+- Injected `StreamWriter` (with a no-op default) so nodes emit progress events while running
+  and remain directly callable outside a graph.
+- `interrupt()` inside `escalate_ticket_node` so high-priority tickets genuinely pause and
+  wait for a human decision via `Command(resume=...)`.
 """
 import json
 import operator
@@ -13,6 +13,7 @@ from typing import Annotated, Optional, TypedDict
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import StreamWriter, interrupt
 
 from .core import triage
 from .tools import look_up_customer
@@ -30,6 +31,11 @@ class TicketState(TypedDict):
     notes: Annotated[list[str], operator.add]
 
 
+def _noop_writer(_: dict) -> None:
+    """Default no-op writer so node functions can still be called directly in unit tests."""
+    return None
+
+
 def _ticket_with_customer(state: TicketState) -> str:
     """Fold the looked-up record into the text `triage()` sees."""
     return (
@@ -38,8 +44,17 @@ def _ticket_with_customer(state: TicketState) -> str:
     )
 
 
-def look_up_customer_node(state: TicketState) -> dict:
+def look_up_customer_node(
+    state: TicketState, writer: StreamWriter = _noop_writer
+) -> dict:
     """First node: read the customer record and write it into state."""
+    writer(
+        {
+            "node": "look_up_customer",
+            "status": "looking up customer",
+            "customer_id": state["customer_id"],
+        }
+    )
     record = look_up_customer(state["customer_id"])
     outcome = "found" if record.get("found") else "not found"
     return {
@@ -48,8 +63,17 @@ def look_up_customer_node(state: TicketState) -> dict:
     }
 
 
-def triage_ticket_node(state: TicketState) -> dict:
+def triage_ticket_node(
+    state: TicketState, writer: StreamWriter = _noop_writer
+) -> dict:
     """Second node: triage the ticket using what the first node wrote."""
+    writer(
+        {
+            "node": "triage_ticket",
+            "status": "triaging ticket with model",
+            "ticket_id": state["ticket_id"],
+        }
+    )
     result = triage(_ticket_with_customer(state))
     return {
         "triage": result.model_dump(mode="json"),
@@ -64,16 +88,49 @@ def route_after_triage(state: TicketState) -> str:
     return "auto_resolve"
 
 
-def escalate_ticket_node(state: TicketState) -> dict:
-    """Terminal node for urgent tickets: record that a human reviewer is needed."""
+def escalate_ticket_node(
+    state: TicketState, writer: StreamWriter = _noop_writer
+) -> dict:
+    """Terminal node for urgent tickets: pause via interrupt() until a human responds."""
+    # Printed at the very top of the node so resume runs clearly show this node re-executes.
+    print(f"[escalate_ticket] entering node for ticket {state['ticket_id']!r}")
+    writer(
+        {
+            "node": "escalate_ticket",
+            "status": "requesting human decision",
+            "ticket_id": state["ticket_id"],
+        }
+    )
+
+    human_decision = interrupt(
+        {
+            "ticket_id": state["ticket_id"],
+            "customer_id": state["customer_id"],
+            "ticket_text": state["ticket_text"],
+            "customer": state["customer"],
+            "triage": state["triage"],
+            "question": "Please review this high-priority ticket and provide a resolution decision.",
+        }
+    )
+
+    print(f"[escalate_ticket] interrupt() returned: {human_decision!r}")
     return {
-        "outcome": "waiting_for_human",
-        "notes": ["escalated: waiting for human review"],
+        "outcome": f"escalated_resolved: {human_decision}",
+        "notes": [f"escalated and resolved by human: {human_decision}"],
     }
 
 
-def auto_resolve_node(state: TicketState) -> dict:
+def auto_resolve_node(
+    state: TicketState, writer: StreamWriter = _noop_writer
+) -> dict:
     """Terminal node for non-urgent tickets: record that ScoutBot handled it."""
+    writer(
+        {
+            "node": "auto_resolve",
+            "status": "auto-resolving ticket",
+            "ticket_id": state["ticket_id"],
+        }
+    )
     return {
         "outcome": "handled",
         "notes": ["resolved automatically by ScoutBot"],
@@ -133,6 +190,6 @@ def run_ticket_graph(
     checkpointer=None,
     config: Optional[dict] = None,
 ) -> TicketState:
-    """Run one ticket all the way through the graph and return the final state."""
+    """Run one ticket through the graph and return the resulting state (or interrupt state)."""
     graph = build_ticket_graph(checkpointer=checkpointer)
     return graph.invoke(initial_state(ticket_text, customer_id, ticket_id), config=config)
