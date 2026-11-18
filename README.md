@@ -27,3 +27,16 @@ When a paused ticket is resumed with `Command(resume=...)`:
 ```bash
 cp .env.example .env   # set your ANTHROPIC_API_KEY
 uv sync                # create .venv/ and install dependencies
+
+# Run offline unit tests
+uv run pytest
+
+# Stream graph execution ("updates" + "custom" events) and pause on high-priority tickets
+uv run python run_graph.py
+
+# Pause in process 1 and resume in process 2 (SQLite checkpoint)
+uv run python resume_demo.py start T-1001
+uv run python resume_demo.py resume T-1001 "Approved duplicate charge refund"
+
+# Run the Week 7 ReAct loop over all sample tickets
+uv run python main.py
