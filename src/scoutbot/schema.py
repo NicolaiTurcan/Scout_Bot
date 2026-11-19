@@ -1,7 +1,7 @@
 """The structured-output contract for ScoutBot's triage step.
 
-Enums (not free strings) for category/priority so a malformed value fails validation loudly,
-instead of silently becoming whatever the model felt like writing.
+Enums (not free strings) are used for category and priority so that a malformed value fails
+validation loudly instead of silently becoming whatever the model felt like writing.
 """
 from enum import Enum
 
@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 
 
 class Category(str, Enum):
+    """Which area of the product a ticket is about."""
+
     billing = "billing"
     technical = "technical"
     account = "account"
@@ -16,6 +18,8 @@ class Category(str, Enum):
 
 
 class Priority(str, Enum):
+    """How urgently a ticket needs attention. ``high`` routes to a human in the graph."""
+
     low = "low"
     medium = "medium"
     high = "high"

@@ -1,55 +1,79 @@
-"""Demonstrate pausing on interrupt() in one process and resuming in a second process.
+"""Pause on ``interrupt()`` in one process and resume it from a second process.
+
+The checkpoint is stored in SQLite with ``durability="sync"``, so the second process can
+pick up exactly where the first one stopped.
 
 Usage:
     uv run python resume_demo.py start T-1001
     uv run python resume_demo.py resume T-1001 "Approved duplicate charge refund"
 """
-import json
 import sys
-from pathlib import Path
 
 from dotenv import load_dotenv
 from langgraph.types import Command
 
-from scoutbot import build_ticket_graph, initial_state, make_sqlite_saver
+from scoutbot import (
+    STREAM_MODES,
+    build_ticket_graph,
+    find_ticket,
+    initial_state,
+    make_sqlite_saver,
+    pending_interrupt,
+    thread_config,
+)
+from scoutbot.config import DEFAULT_CHECKPOINT_PATH
 
-load_dotenv()
+USAGE = (
+    "Usage:\n"
+    "  python resume_demo.py start <ticket_id>\n"
+    "  python resume_demo.py resume <ticket_id> <human_answer>"
+)
 
-DB_PATH = str(Path(__file__).parent / "scoutbot_checkpoints.db")
-TICKETS_PATH = Path(__file__).parent / "sample_tickets.json"
 
-
-def _load_ticket(ticket_id: str) -> dict:
-    tickets = json.loads(TICKETS_PATH.read_text())
-    for ticket in tickets:
-        if ticket["id"] == ticket_id:
-            return ticket
-    raise SystemExit(f"Unknown ticket_id: {ticket_id}")
+def _sqlite_graph():
+    """Build the ticket graph backed by the shared SQLite checkpoint file."""
+    return build_ticket_graph(checkpointer=make_sqlite_saver(DEFAULT_CHECKPOINT_PATH))
 
 
 def start_until_pause(ticket_id: str) -> None:
-    ticket = _load_ticket(ticket_id)
-    saver = make_sqlite_saver(DB_PATH)
-    graph = build_ticket_graph(checkpointer=saver)
-    config = {"configurable": {"thread_id": ticket_id}}
+    """Process 1: run a ticket until it finishes or pauses on ``interrupt()``.
+
+    Args:
+        ticket_id: Id of a ticket in ``sample_tickets.json``.
+
+    Raises:
+        SystemExit: If the ticket id is unknown.
+    """
+    try:
+        ticket = find_ticket(ticket_id)
+    except KeyError as exc:
+        raise SystemExit(exc.args[0]) from exc
+
+    graph = _sqlite_graph()
+    config = thread_config(ticket_id)
     state = initial_state(ticket["text"], ticket["customer_id"], ticket["id"])
 
     print(f"[process 1] Starting {ticket_id} with durability='sync'...")
     for mode, chunk in graph.stream(
-        state, config=config, stream_mode=["updates", "custom"], durability="sync"
+        state, config=config, stream_mode=STREAM_MODES, durability="sync"
     ):
         print(f"[process 1] [{mode}] {chunk}")
 
-    snapshot = graph.get_state(config)
-    print(f"[process 1] Exiting. Pending next nodes: {snapshot.next}")
-    if snapshot.tasks and snapshot.tasks[0].interrupts:
-        print(f"[process 1] Interrupt payload: {snapshot.tasks[0].interrupts[0].value}")
+    print(f"[process 1] Exiting. Pending next nodes: {graph.get_state(config).next}")
+    payload = pending_interrupt(graph, config)
+    if payload is not None:
+        print(f"[process 1] Interrupt payload: {payload}")
 
 
 def resume_from_interrupt(ticket_id: str, human_answer: str) -> None:
-    saver = make_sqlite_saver(DB_PATH)
-    graph = build_ticket_graph(checkpointer=saver)
-    config = {"configurable": {"thread_id": ticket_id}}
+    """Process 2: load the checkpoint and resume the paused run with a human answer.
+
+    Args:
+        ticket_id: Thread id used in :func:`start_until_pause`.
+        human_answer: Value returned by ``interrupt()`` inside ``escalate_ticket``.
+    """
+    graph = _sqlite_graph()
+    config = thread_config(ticket_id)
 
     snapshot = graph.get_state(config)
     print(f"[process 2] Loaded checkpoint for {ticket_id}. Pending next: {snapshot.next}")
@@ -61,7 +85,7 @@ def resume_from_interrupt(ticket_id: str, human_answer: str) -> None:
     for mode, chunk in graph.stream(
         Command(resume=human_answer),
         config=config,
-        stream_mode=["updates", "custom"],
+        stream_mode=STREAM_MODES,
         durability="sync",
     ):
         print(f"[process 2] [{mode}] {chunk}")
@@ -73,23 +97,27 @@ def resume_from_interrupt(ticket_id: str, human_answer: str) -> None:
     )
 
 
-def main() -> None:
-    if len(sys.argv) < 3 or sys.argv[1] not in {"start", "resume"}:
-        raise SystemExit(
-            "Usage:\n"
-            "  python resume_demo.py start <ticket_id>\n"
-            "  python resume_demo.py resume <ticket_id> <human_answer>"
-        )
+def main(argv: list[str]) -> None:
+    """Parse the command line and run the requested phase.
 
-    command, ticket_id = sys.argv[1], sys.argv[2]
+    Args:
+        argv: Arguments without the program name.
+
+    Raises:
+        SystemExit: On invalid usage.
+    """
+    if len(argv) < 2 or argv[0] not in {"start", "resume"}:
+        raise SystemExit(USAGE)
+
+    command, ticket_id = argv[0], argv[1]
     if command == "start":
         start_until_pause(ticket_id)
-    else:
-        if len(sys.argv) < 4:
-            raise SystemExit("Usage: python resume_demo.py resume <ticket_id> <human_answer>")
-        human_answer = " ".join(sys.argv[3:])
-        resume_from_interrupt(ticket_id, human_answer)
+        return
+    if len(argv) < 3:
+        raise SystemExit("Usage: python resume_demo.py resume <ticket_id> <human_answer>")
+    resume_from_interrupt(ticket_id, " ".join(argv[2:]))
 
 
 if __name__ == "__main__":
-    main()
+    load_dotenv()
+    main(sys.argv[1:])

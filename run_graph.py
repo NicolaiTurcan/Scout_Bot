@@ -1,43 +1,44 @@
-"""Entry point for Week 8 Day 3: stream custom events alongside node updates and observe
-high-priority tickets pausing on interrupt().
+"""Stream sample tickets through the ticket graph and show where high-priority ones pause.
+
+Both ``"updates"`` and ``"custom"`` stream modes are printed, so each node's custom progress
+event appears before that node's state update chunk. High-priority tickets stop at
+``interrupt()`` and their payload is printed.
 
 Usage:
     uv run python run_graph.py
 """
 import json
-from pathlib import Path
 
 from dotenv import load_dotenv
 from langgraph.checkpoint.memory import InMemorySaver
 
-from scoutbot import build_ticket_graph, initial_state
+from scoutbot import (
+    STREAM_MODES,
+    build_ticket_graph,
+    initial_state,
+    load_tickets,
+    pending_interrupt,
+    thread_config,
+)
 
-load_dotenv()
 
-TICKETS_PATH = Path(__file__).parent / "sample_tickets.json"
+def main() -> None:
+    """Run every sample ticket through the graph with an in-memory checkpointer."""
+    load_dotenv()
+    graph = build_ticket_graph(checkpointer=InMemorySaver())
 
-
-def main():
-    checkpointer = InMemorySaver()
-    graph = build_ticket_graph(checkpointer=checkpointer)
-    tickets = json.loads(TICKETS_PATH.read_text())
-
-    for ticket in tickets:
+    for ticket in load_tickets():
         print(f"=== {ticket['id']}: {ticket['text'][:60]}... ===")
         state = initial_state(ticket["text"], ticket["customer_id"], ticket["id"])
-        config = {"configurable": {"thread_id": ticket["id"]}}
+        config = thread_config(ticket["id"])
 
-        # Stream both "updates" and "custom" so custom progress events appear before each
-        # node's final state update chunk.
-        for mode, chunk in graph.stream(
-            state, config=config, stream_mode=["updates", "custom"]
-        ):
+        for mode, chunk in graph.stream(state, config=config, stream_mode=STREAM_MODES):
             print(f"  [{mode}] {json.dumps(chunk, default=str)}")
 
-        snapshot = graph.get_state(config)
-        print(f"  checkpoint next nodes: {snapshot.next}")
-        if snapshot.tasks and snapshot.tasks[0].interrupts:
-            print(f"  paused with interrupt payload: {snapshot.tasks[0].interrupts[0].value}")
+        print(f"  checkpoint next nodes: {graph.get_state(config).next}")
+        payload = pending_interrupt(graph, config)
+        if payload is not None:
+            print(f"  paused with interrupt payload: {payload}")
         print()
 
 
