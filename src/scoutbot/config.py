@@ -38,3 +38,16 @@ def get_model() -> str:
         :data:`DEFAULT_MODEL` if it is unset.
     """
     return os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL)
+
+
+#: Jaeger UI used when ``TRACE_UI_URL`` is not set.
+DEFAULT_TRACE_UI_URL = "http://127.0.0.1:16686"
+
+
+def get_trace_ui_url() -> str:
+    """Return the base URL of the trace viewer UI.
+
+    Returns:
+        ``TRACE_UI_URL`` from the environment, or :data:`DEFAULT_TRACE_UI_URL`.
+    """
+    return os.environ.get("TRACE_UI_URL", DEFAULT_TRACE_UI_URL).rstrip("/")

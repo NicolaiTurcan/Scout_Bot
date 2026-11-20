@@ -61,6 +61,7 @@ gives a final answer. If it hits the step cap, the ticket is escalated automatic
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - An Anthropic API key, needed only to run the demos. The tests run offline.
+- Docker with Compose (optional), to run the local Jaeger trace viewer.
 
 ## Installation
 
@@ -78,6 +79,9 @@ Then edit `.env`:
 |---|---|---|
 | `ANTHROPIC_API_KEY` | yes | Your Anthropic API key. |
 | `ANTHROPIC_MODEL` | no | Model id. Defaults to `claude-haiku-4-5`. The agent loop needs a model that supports the `web_fetch` and `code_execution` server tools. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no | Where workflow traces go: `http://127.0.0.1:4318` (local Jaeger) or empty (print spans to the console). |
+| `OTEL_SERVICE_NAME` | no | Service name in the trace viewer. Defaults to `scoutbot`. |
+| `TRACE_UI_URL` | no | Jaeger UI/API base URL. Defaults to `http://127.0.0.1:16686`. |
 
 Without uv: `python -m venv .venv`, activate it, then `pip install -e . pytest`, and run the
 commands below without the `uv run` prefix.
@@ -105,6 +109,9 @@ uv run python resume_demo.py start T-1001
 
 # Process 2 (any time later): load the checkpoint and finish the run with a decision.
 uv run python resume_demo.py resume T-1001 "Approved duplicate charge refund"
+
+# Any time: list the thread's checkpoints and the traces that wrote them.
+uv run python resume_demo.py history T-1001
 ```
 
 The checkpoint is stored in `scoutbot_checkpoints.db` in the project root. The second command
@@ -169,6 +176,53 @@ agent_result = run_agent_loop(
 print(agent_result.final_answer, agent_result.escalated)
 ```
 
+## Observability
+
+The ticket workflow (`run_graph.py`, `resume_demo.py`) is traced with
+[OpenTelemetry](https://opentelemetry.io/) via
+[TraceVerde](https://github.com/Mandark-droid/genai_otel_instrument) (`genai-otel-instrument`).
+All setup lives in `src/scoutbot/observability.py`; nodes contain no `print()` or logging.
+
+One ticket run is one trace:
+
+```
+scoutbot.ticket_run                    ticket, run mode, user, host, status, total tokens + cost
+└─ langgraph.graph.stream              (TraceVerde)
+   ├─ scoutbot.node.look_up_customer   ids, state update
+   ├─ scoutbot.node.triage_ticket      triage result
+   │  └─ anthropic.messages.create     model, tokens, cost (TraceVerde)
+   └─ scoutbot.node.escalate_ticket    status ERROR + event while paused on interrupt()
+```
+
+- `@traced_node` wraps every node: timing, ticket/customer ids, the state update. A pause on
+  `interrupt()` is recorded as an error so paused runs stand out. Only the payload keys and the
+  question are recorded, never the ticket text or the customer record.
+- `traced_ticket_run` opens the root span and writes `trace_id`, run mode, user, host and pid
+  into the metadata of every checkpoint the run creates, so `resume_demo.py history` links
+  each checkpoint to its trace.
+
+### Local Jaeger
+
+```bash
+docker compose up -d                 # Jaeger v2: OTLP on 4318, UI on 16686
+uv run python run_graph.py           # with OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+```
+
+Open http://127.0.0.1:16686, choose service `scoutbot`, and search, for example, by tag
+`scoutbot.ticket_id=T-1001` or `error=true`. Traces are stored with Badger in the
+`jaeger-data` Docker volume (kept for 7 days), so they survive `docker compose down`;
+`docker compose down -v` deletes them. Ports are bound to `127.0.0.1` only.
+
+### Read traces from code
+
+```bash
+uv run python read_traces.py                  # runs and span timings, last 24 hours
+uv run python read_traces.py --ticket T-2001  # one ticket's runs only
+```
+
+`read_traces.py` queries Jaeger's API v3 and prints one line per run (status, duration, model
+calls, tokens, cost, trace id) and a timing benchmark per node and model call.
+
 ## Sample data
 
 | File | Contents |
@@ -196,7 +250,10 @@ response blocks.
 ```
 ├── main.py                # demo: ReAct agent loop + telemetry summary
 ├── run_graph.py           # demo: stream the workflow over all sample tickets
-├── resume_demo.py         # demo: pause/resume across processes (SQLite)
+├── resume_demo.py         # demo: pause/resume across processes (SQLite) + checkpoint history
+├── read_traces.py         # report: runs and span timings read back from Jaeger
+├── docker-compose.yml     # local Jaeger v2 (OTLP in, web UI out)
+├── jaeger/config.yaml     # Jaeger config: Badger on-disk storage in a Docker volume
 ├── src/scoutbot/
 │   ├── config.py          # model name (read lazily from ANTHROPIC_MODEL), token budget, data paths
 │   ├── llm.py             # get_client(): the single Anthropic SDK boundary
@@ -204,6 +261,8 @@ response blocks.
 │   ├── schema.py          # TicketTriage, Category, Priority
 │   ├── classifier.py      # triage(): one forced tool call, retry once, then TriageError
 │   ├── telemetry.py       # JSONL step logger: log_step / read_log
+│   ├── observability.py   # OpenTelemetry setup, @traced_node, traced_ticket_run, token totals
+│   ├── trace_reader.py    # fetch and summarize traces from Jaeger's API v3
 │   ├── tools/             # customer lookup, escalation, triage tool, server tools
 │   ├── agent/             # ReAct loop: models, prompts, dispatch, server results, loop
 │   └── graph/             # LangGraph workflow: state, nodes, builder, checkpoint

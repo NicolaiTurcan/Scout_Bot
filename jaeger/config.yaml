@@ -1,0 +1,62 @@
+# Jaeger v2 for local ScoutBot development: OTLP in, Badger (on-disk) storage, web UI out.
+# Based on cmd/jaeger/config-badger.yaml from the Jaeger v2.22.0 repository.
+
+service:
+  extensions: [jaeger_storage, jaeger_query, healthcheckv2]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [jaeger_storage_exporter]
+    # TraceVerde always sends OTLP metrics too. Jaeger stores traces only, so metrics are
+    # accepted and dropped here instead of failing with 404 on /v1/metrics.
+    metrics:
+      receivers: [otlp]
+      exporters: [nop]
+  telemetry:
+    resource:
+      service.name: jaeger
+    logs:
+      level: info
+
+extensions:
+  healthcheckv2:
+    use_v2: true
+    http:
+      endpoint: 0.0.0.0:13133
+
+  # Web UI and query API (http://127.0.0.1:16686).
+  jaeger_query:
+    storage:
+      traces: badger_store
+    http:
+      endpoint: 0.0.0.0:16686
+
+  jaeger_storage:
+    backends:
+      badger_store:
+        badger:
+          # /tmp is a Docker volume (see docker-compose.yml), so traces survive restarts.
+          directories:
+            keys: /tmp/jaeger/keys
+            values: /tmp/jaeger/values
+          ephemeral: false
+          ttl:
+            spans: 168h # keep traces for 7 days
+
+receivers:
+  # ScoutBot sends spans over OTLP/HTTP (4318); gRPC (4317) is open for other clients.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+
+exporters:
+  jaeger_storage_exporter:
+    trace_storage: badger_store
+  nop:

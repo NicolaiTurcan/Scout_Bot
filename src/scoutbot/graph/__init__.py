@@ -8,6 +8,7 @@
 from .builder import (
     STREAM_MODES,
     build_ticket_graph,
+    checkpoint_history,
     pending_interrupt,
     run_ticket_graph,
     thread_config,
@@ -27,6 +28,7 @@ __all__ = [
     "TicketState",
     "auto_resolve_node",
     "build_ticket_graph",
+    "checkpoint_history",
     "escalate_ticket_node",
     "initial_state",
     "look_up_customer_node",

@@ -1,0 +1,21 @@
+# Local trace backend for ScoutBot. Start with `docker compose up -d`,
+# then open the Jaeger UI at http://127.0.0.1:16686.
+services:
+  jaeger:
+    image: jaegertracing/jaeger:2.22.0
+    container_name: scoutbot-jaeger
+    command: ["--config", "/etc/jaeger/config.yaml"]
+    volumes:
+      - ./jaeger/config.yaml:/etc/jaeger/config.yaml:ro
+      # Named volume: Badger's trace data persists across container restarts and rebuilds.
+      - jaeger-data:/tmp
+    ports:
+      # Bound to 127.0.0.1 only, so traces are not reachable from other machines.
+      - "127.0.0.1:16686:16686" # web UI + query API
+      - "127.0.0.1:4317:4317" # OTLP/gRPC
+      - "127.0.0.1:4318:4318" # OTLP/HTTP (used by ScoutBot)
+      - "127.0.0.1:13133:13133" # health check
+    restart: unless-stopped
+
+volumes:
+  jaeger-data:

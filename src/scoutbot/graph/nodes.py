@@ -7,12 +7,17 @@ in unit tests.
 
 High-priority tickets pause inside :func:`escalate_ticket_node` via ``interrupt()`` until a
 human answers with ``Command(resume=...)``.
+
+Every node is wrapped with :func:`scoutbot.observability.traced_node`, which records timing,
+ids, the state update and interrupts on an OpenTelemetry span. Nodes therefore contain no
+``print()`` or logging calls.
 """
 import json
 
 from langgraph.types import StreamWriter, interrupt
 
 from ..classifier import triage
+from ..observability import traced_node
 from ..schema import Priority
 from ..tools import look_up_customer
 from .state import TicketState
@@ -30,7 +35,7 @@ ESCALATION_QUESTION = (
 
 def noop_writer(_: dict) -> None:
     """Default ``StreamWriter`` that discards events, for calling nodes outside a graph."""
-    return None
+    return None  # noqa: RET501
 
 
 def _ticket_with_customer(state: TicketState) -> str:
@@ -48,6 +53,7 @@ def _ticket_with_customer(state: TicketState) -> str:
     )
 
 
+@traced_node(LOOK_UP_CUSTOMER)
 def look_up_customer_node(state: TicketState, writer: StreamWriter = noop_writer) -> dict:
     """First node: read the customer record and write it into state.
 
@@ -73,6 +79,7 @@ def look_up_customer_node(state: TicketState, writer: StreamWriter = noop_writer
     }
 
 
+@traced_node(TRIAGE_TICKET)
 def triage_ticket_node(state: TicketState, writer: StreamWriter = noop_writer) -> dict:
     """Second node: triage the ticket using the customer record from the first node.
 
@@ -114,6 +121,7 @@ def route_after_triage(state: TicketState) -> str:
     return AUTO_RESOLVE
 
 
+@traced_node(ESCALATE_TICKET)
 def escalate_ticket_node(state: TicketState, writer: StreamWriter = noop_writer) -> dict:
     """Terminal node for urgent tickets: pause via ``interrupt()`` until a human responds.
 
@@ -127,8 +135,6 @@ def escalate_ticket_node(state: TicketState, writer: StreamWriter = noop_writer)
     Returns:
         Update with ``outcome`` and one ``notes`` entry describing the human decision.
     """
-    # Printed at the very top of the node so resume runs visibly show that it re-executes.
-    print(f"[{ESCALATE_TICKET}] entering node for ticket {state['ticket_id']!r}")
     writer(
         {
             "node": ESCALATE_TICKET,
@@ -147,14 +153,13 @@ def escalate_ticket_node(state: TicketState, writer: StreamWriter = noop_writer)
             "question": ESCALATION_QUESTION,
         }
     )
-
-    print(f"[{ESCALATE_TICKET}] interrupt() returned: {human_decision!r}")
     return {
         "outcome": f"escalated_resolved: {human_decision}",
         "notes": [f"escalated and resolved by human: {human_decision}"],
     }
 
 
+@traced_node(AUTO_RESOLVE)
 def auto_resolve_node(state: TicketState, writer: StreamWriter = noop_writer) -> dict:
     """Terminal node for non-urgent tickets: record that ScoutBot handled it.
 

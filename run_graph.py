@@ -20,11 +20,13 @@ from scoutbot import (
     pending_interrupt,
     thread_config,
 )
+from scoutbot.observability import flush, setup_observability, traced_ticket_run
 
 
 def main() -> None:
     """Run every sample ticket through the graph with an in-memory checkpointer."""
     load_dotenv()
+    setup_observability()
     graph = build_ticket_graph(checkpointer=InMemorySaver())
 
     for ticket in load_tickets():
@@ -32,14 +34,19 @@ def main() -> None:
         state = initial_state(ticket["text"], ticket["customer_id"], ticket["id"])
         config = thread_config(ticket["id"])
 
-        for mode, chunk in graph.stream(state, config=config, stream_mode=STREAM_MODES):
-            print(f"  [{mode}] {json.dumps(chunk, default=str)}")
+        # One root span per ticket: every graph, node and model-call span nests under it.
+        with traced_ticket_run(config, run_mode="batch") as run:
+            for mode, chunk in graph.stream(state, config=run.config, stream_mode=STREAM_MODES):
+                print(f"  [{mode}] {json.dumps(chunk, default=str)}")
+            run.record_result(graph.get_state(config))
 
         print(f"  checkpoint next nodes: {graph.get_state(config).next}")
         payload = pending_interrupt(graph, config)
         if payload is not None:
             print(f"  paused with interrupt payload: {payload}")
         print()
+
+    flush()
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ Topology::
     START -> look_up_customer -> triage_ticket -+-> escalate_ticket -> END   (priority high)
                                                 +-> auto_resolve    -> END   (otherwise)
 """
-from typing import Any, Optional
+from typing import Any
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
@@ -28,7 +28,7 @@ from .state import TicketState, initial_state
 STREAM_MODES = ["updates", "custom"]
 
 
-def build_ticket_graph(checkpointer: Optional[BaseCheckpointSaver] = None) -> CompiledStateGraph:
+def build_ticket_graph(checkpointer: BaseCheckpointSaver | None = None) -> CompiledStateGraph:
     """Wire nodes and conditional edges, then compile the graph.
 
     Args:
@@ -59,9 +59,9 @@ def build_ticket_graph(checkpointer: Optional[BaseCheckpointSaver] = None) -> Co
 def run_ticket_graph(
     ticket_text: str,
     customer_id: str,
-    ticket_id: Optional[str] = None,
-    checkpointer: Optional[BaseCheckpointSaver] = None,
-    config: Optional[dict] = None,
+    ticket_id: str | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
+    config: dict | None = None,
 ) -> TicketState:
     """Run one ticket through a freshly built graph.
 
@@ -91,7 +91,7 @@ def thread_config(thread_id: str) -> dict:
     return {"configurable": {"thread_id": thread_id}}
 
 
-def pending_interrupt(graph: CompiledStateGraph, config: dict) -> Optional[Any]:
+def pending_interrupt(graph: CompiledStateGraph, config: dict) -> Any | None:
     """Return the payload of the interrupt a thread is paused on, if any.
 
     Args:
@@ -106,3 +106,34 @@ def pending_interrupt(graph: CompiledStateGraph, config: dict) -> Optional[Any]:
         if task.interrupts:
             return task.interrupts[0].value
     return None
+
+
+#: Checkpoint metadata keys written by ``scoutbot.observability.traced_ticket_run``.
+RUN_METADATA_KEYS = ("trace_id", "run_mode", "run_by", "host", "pid")
+
+
+def checkpoint_history(graph: CompiledStateGraph, config: dict) -> list[dict]:
+    """List a thread's checkpoints, oldest first, with the run and trace that wrote each one.
+
+    Args:
+        graph: A graph compiled with a checkpointer.
+        config: Run config identifying the thread.
+
+    Returns:
+        One dict per checkpoint: id, time, step, source, next nodes, outcome and run metadata.
+    """
+    rows = []
+    for snapshot in graph.get_state_history(config):
+        metadata = snapshot.metadata or {}
+        rows.append(
+            {
+                "checkpoint_id": snapshot.config["configurable"]["checkpoint_id"],
+                "created_at": snapshot.created_at,
+                "step": metadata.get("step"),
+                "source": metadata.get("source"),
+                "next": list(snapshot.next),
+                "outcome": (snapshot.values or {}).get("outcome") or None,
+                **{key: metadata.get(key) for key in RUN_METADATA_KEYS},
+            }
+        )
+    return list(reversed(rows))
