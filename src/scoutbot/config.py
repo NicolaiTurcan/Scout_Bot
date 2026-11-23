@@ -23,6 +23,12 @@ APP_LOG_PATH = PROJECT_ROOT / "sample_app.log"
 DEFAULT_LOG_PATH = PROJECT_ROOT / "scoutbot_log.jsonl"
 #: Default SQLite file for LangGraph checkpoints.
 DEFAULT_CHECKPOINT_PATH = PROJECT_ROOT / "scoutbot_checkpoints.db"
+#: Folder of policy documents indexed by :mod:`scoutbot.knowledge`.
+KNOWLEDGE_BASE_DIR = PROJECT_ROOT / "knowledge_base"
+#: Default SQLite file for the retrieval store.
+DEFAULT_KNOWLEDGE_DB_PATH = PROJECT_ROOT / "knowledge.db"
+#: Default DuckDB file for the retrieval store used by the ticket graph.
+DEFAULT_KNOWLEDGE_DUCKDB_PATH = PROJECT_ROOT / "knowledge.duckdb"
 
 #: Model used when ``ANTHROPIC_MODEL`` is not set.
 DEFAULT_MODEL = "claude-haiku-4-5"

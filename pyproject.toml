@@ -7,9 +7,12 @@ dependencies = [
     "anthropic>=0.110,<1",
     # New this day, and the only new dependency: LangGraph as the orchestration layer. No
     # langchain-anthropic - every model call still goes through the Anthropic SDK directly.
+    "duckdb>=1.1,<2",
+    "fastembed>=0.8,<0.9",
     "genai-otel-instrument[anthropic,langgraph]>=1.48.1",
     "langgraph>=1.2,<2",
     "langgraph-checkpoint-sqlite>=3.1,<4",
+    "numpy>=1.26,<3",
     "pydantic>=2.9,<3",
     "python-dotenv>=1.0,<2",
 ]

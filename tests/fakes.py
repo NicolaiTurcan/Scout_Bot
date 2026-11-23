@@ -1,9 +1,12 @@
-"""Builders for fake Anthropic Messages API responses.
+"""Builders for fake Anthropic Messages API responses, plus a fake embedder.
 
 Real responses are SDK objects; the code under test only reads attributes from them, so
 ``SimpleNamespace`` instances with the same attribute names are enough.
 """
+import re
 from types import SimpleNamespace
+
+import numpy as np
 
 HIGH_TRIAGE = {"category": "billing", "priority": "high", "suggested_owner": "billing-team"}
 LOW_TRIAGE = {"category": "account", "priority": "low", "suggested_owner": "support-team"}
@@ -59,3 +62,23 @@ def bash_result_block(tool_use_id, stdout, return_code=0, stderr=""):
             return_code=return_code,
         ),
     )
+
+
+#: Each dimension of a ``keyword_embedder`` vector counts one of these words.
+VOCAB = ["refund", "shipping", "warranty", "password", "days"]
+
+
+def keyword_embedder(texts):
+    """Fake embedder: count each ``VOCAB`` word in each text.
+
+    Args:
+        texts: Texts to embed.
+
+    Returns:
+        One float32 vector of length ``len(VOCAB)`` per text.
+    """
+    vectors = []
+    for text in texts:
+        words = re.findall(r"[a-z]+", text.lower())
+        vectors.append(np.array([words.count(term) for term in VOCAB], dtype=np.float32))
+    return vectors

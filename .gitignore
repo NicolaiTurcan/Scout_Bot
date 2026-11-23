@@ -7,3 +7,5 @@ __pycache__/
 .ipynb_checkpoints/
 *.jsonl
 *.db
+*.duckdb
+*.duckdb.wal

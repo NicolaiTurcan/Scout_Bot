@@ -2,8 +2,10 @@
 
 Topology::
 
-    START -> look_up_customer -> triage_ticket -+-> escalate_ticket -> END   (priority high)
-                                                +-> auto_resolve    -> END   (otherwise)
+    START -> look_up_customer -> [retrieve_policies] -> triage_ticket -+-> escalate_ticket -> END
+                                                                       +-> auto_resolve    -> END
+
+``retrieve_policies`` is added only when a knowledge base is passed in.
 """
 from typing import Any
 
@@ -11,14 +13,17 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from ..knowledge import KnowledgeStore
 from .nodes import (
     AUTO_RESOLVE,
     ESCALATE_TICKET,
     LOOK_UP_CUSTOMER,
+    RETRIEVE_POLICIES,
     TRIAGE_TICKET,
     auto_resolve_node,
     escalate_ticket_node,
     look_up_customer_node,
+    make_retrieve_policies_node,
     route_after_triage,
     triage_ticket_node,
 )
@@ -28,12 +33,16 @@ from .state import TicketState, initial_state
 STREAM_MODES = ["updates", "custom"]
 
 
-def build_ticket_graph(checkpointer: BaseCheckpointSaver | None = None) -> CompiledStateGraph:
+def build_ticket_graph(
+    checkpointer: BaseCheckpointSaver | None = None,
+    knowledge_base: KnowledgeStore | None = None,
+) -> CompiledStateGraph:
     """Wire nodes and conditional edges, then compile the graph.
 
     Args:
         checkpointer: Optional checkpointer. Required to resume after ``interrupt()`` or
             to inspect state with ``get_state()``.
+        knowledge_base: Optional store; if given, policies are retrieved before triage.
 
     Returns:
         The compiled graph.
@@ -45,7 +54,12 @@ def build_ticket_graph(checkpointer: BaseCheckpointSaver | None = None) -> Compi
     builder.add_node(AUTO_RESOLVE, auto_resolve_node)
 
     builder.add_edge(START, LOOK_UP_CUSTOMER)
-    builder.add_edge(LOOK_UP_CUSTOMER, TRIAGE_TICKET)
+    if knowledge_base is None:
+        builder.add_edge(LOOK_UP_CUSTOMER, TRIAGE_TICKET)
+    else:
+        builder.add_node(RETRIEVE_POLICIES, make_retrieve_policies_node(knowledge_base))
+        builder.add_edge(LOOK_UP_CUSTOMER, RETRIEVE_POLICIES)
+        builder.add_edge(RETRIEVE_POLICIES, TRIAGE_TICKET)
     builder.add_conditional_edges(
         TRIAGE_TICKET,
         route_after_triage,
@@ -62,6 +76,7 @@ def run_ticket_graph(
     ticket_id: str | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     config: dict | None = None,
+    knowledge_base: KnowledgeStore | None = None,
 ) -> TicketState:
     """Run one ticket through a freshly built graph.
 
@@ -71,11 +86,12 @@ def run_ticket_graph(
         ticket_id: Optional ticket id.
         checkpointer: Optional checkpointer passed to :func:`build_ticket_graph`.
         config: Optional LangGraph run config (e.g. from :func:`thread_config`).
+        knowledge_base: Optional store passed to :func:`build_ticket_graph`.
 
     Returns:
         The resulting state. If the run paused, it contains an ``"__interrupt__"`` key.
     """
-    graph = build_ticket_graph(checkpointer=checkpointer)
+    graph = build_ticket_graph(checkpointer=checkpointer, knowledge_base=knowledge_base)
     return graph.invoke(initial_state(ticket_text, customer_id, ticket_id), config=config)
 
 

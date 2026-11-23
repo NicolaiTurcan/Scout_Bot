@@ -3,7 +3,13 @@ import operator
 from typing import Annotated, Optional, TypedDict
 
 
-class TicketState(TypedDict):
+class _OptionalTicketFields(TypedDict, total=False):
+    """Fields written only when the graph has a knowledge base."""
+
+    policies: list[dict]  # Retrieved passages: source, ordinal, text, score.
+
+
+class TicketState(_OptionalTicketFields):
     """Everything one ticket run accumulates, declared once, in one place.
 
     Plain fields are *replaced* by each node update. ``notes`` uses ``operator.add`` as its

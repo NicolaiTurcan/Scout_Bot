@@ -11,6 +11,8 @@ Package layout:
 - :mod:`scoutbot.telemetry` - JSONL step logging.
 - :mod:`scoutbot.agent` - bounded ReAct agent loop.
 - :mod:`scoutbot.graph` - LangGraph workflow with interrupts and checkpoints.
+- :mod:`scoutbot.knowledge` - chunking, embeddings, cosine search on SQLite.
+- :mod:`scoutbot.duckdb_store` - DuckDB knowledge base used by the graph.
 """
 from .agent import AgentResult, LoopStep, run_agent_loop
 from .classifier import TriageError, triage

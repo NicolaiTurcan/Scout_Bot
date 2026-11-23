@@ -23,20 +23,24 @@ ScoutBot offers two ways to process a ticket:
 ### Ticket workflow
 
 ```
-START → look_up_customer → triage_ticket ─┬─ priority = high → escalate_ticket → END
-                                          └─ otherwise       → auto_resolve    → END
+START → look_up_customer → [retrieve_policies] → triage_ticket ─┬─ priority = high → escalate_ticket → END
+                                                                └─ otherwise       → auto_resolve    → END
 ```
 
 1. **look_up_customer** reads the account (plan, account age, recent refunds) from the mock
    customer database.
-2. **triage_ticket** asks the model to classify the ticket together with the customer record.
+2. **retrieve_policies** (only when a knowledge base is passed to `build_ticket_graph`)
+   searches the policy documents with the ticket text and keeps passages scoring at least
+   `MIN_POLICY_SCORE` (0.7).
+3. **triage_ticket** asks the model to classify the ticket together with the customer record.
    The result is validated against a Pydantic schema:
+   Retrieved policies are appended to the prompt as cited passages (`[refunds.md#1] ...`).
    `category` (billing / technical / account / other), `priority` (low / medium / high) and
    `suggested_owner`. An invalid reply is retried once and then raises `TriageError`, so
    ScoutBot never silently guesses.
-3. **auto_resolve** marks low- and medium-priority tickets as handled.
-4. **escalate_ticket** pauses the graph for high-priority tickets and waits for a human
-   decision. With a checkpointer the paused run is saved, so the decision can arrive later
+4. **auto_resolve** marks low- and medium-priority tickets as handled.
+5. **escalate_ticket** pauses the graph for high-priority tickets and waits for a human
+   decision; the interrupt payload includes the retrieved policies. With a checkpointer the paused run is saved, so the decision can arrive later
    from another process. On resume, the first two nodes are **not** re-run (no extra model
    calls); only `escalate_ticket` runs again, and `interrupt()` returns the human's answer.
 
@@ -94,7 +98,9 @@ commands below without the `uv run` prefix.
 uv run python run_graph.py
 ```
 
-Every ticket in `sample_tickets.json` goes through the graph. For each ticket you will see:
+The policy documents are indexed into `knowledge.duckdb` first (only new or changed
+documents are embedded), then every ticket in `sample_tickets.json` goes through the graph
+with that knowledge base. For each ticket you will see:
 
 - `[custom]` progress events and `[updates]` state changes, in execution order;
 - `checkpoint next nodes` — `()` if the ticket finished, `('escalate_ticket',)` if it paused;
@@ -110,7 +116,7 @@ uv run python resume_demo.py start T-1001
 # Process 2 (any time later): load the checkpoint and finish the run with a decision.
 uv run python resume_demo.py resume T-1001 "Approved duplicate charge refund"
 
-# Any time: list the thread's checkpoints and the traces that wrote them.
+ thread's checkpoints and the traces that wrote them.
 uv run python resume_demo.py history T-1001
 ```
 
@@ -176,6 +182,80 @@ agent_result = run_agent_loop(
 print(agent_result.final_answer, agent_result.escalated)
 ```
 
+### 5. Retrieve policy passages
+
+```bash
+uv run python run_retrieve.py
+```
+
+Chunks the policy documents in `knowledge_base/`, embeds each chunk with fastembed
+(`BAAI/bge-small-en-v1.5`, 384 dimensions), stores the vectors as float32 BLOBs in an ordinary
+SQLite file (`knowledge.db`), reopens that file without re-indexing, and prints the top passages
+for a few support questions. One of them is worded with no keywords in common with the policy
+it should find, and one cannot be answered by the corpus at all, so its best score is visibly
+lower. The first run downloads the model (~130MB) once; after that, retrieval is fully offline.
+
+As a library:
+
+```python
+from scoutbot.knowledge import KnowledgeBase, fastembed_embedder, load_corpus
+
+with KnowledgeBase(fastembed_embedder(), "knowledge.db") as kb:
+    kb.build(load_corpus())
+    for source, ordinal, text, score in kb.search("how long do refunds take?", k=3):
+        print(f"{score:.3f} {source}#{ordinal}")
+```
+
+The store depends only on the embedder function type (`texts -> list of float32 vectors`), so
+any embedder, including a fake one in tests, can be passed in. There is no vector database and
+no SQLite extension: search is a brute-force cosine over every stored vector.
+
+### 6. Knowledge base on DuckDB
+
+`scoutbot.duckdb_store.DuckDBKnowledgeBase` is the store the ticket graph uses. Vectors live
+in a `FLOAT[384]` column and DuckDB ranks them itself with `array_cosine_similarity`.
+
+```python
+from scoutbot.duckdb_store import DuckDBKnowledgeBase
+from scoutbot.knowledge import fastembed_embedder, load_corpus
+
+with DuckDBKnowledgeBase(fastembed_embedder(), "knowledge.duckdb") as kb:
+    print(kb.index(load_corpus()))  # IndexStats(embedded=0, unchanged=5, removed=0) on reruns
+    print(kb.search("how long do refunds take?", k=3))
+```
+
+**No re-embedding on every start.** The store keeps a sha256 per document and the model name
+and chunk settings in a `meta` table. `index()` embeds only new or changed documents and
+drops removed ones; a different model or chunk setting rebuilds everything, and `search()`
+refuses a store built with another model. First index: ~0.5 s; rerun: ~0.03 s.
+
+Two exploration scripts:
+
+```bash
+uv run python compare_chunking.py   # chunk size/overlap vs. retrieval quality
+uv run python explore_duckdb.py     # vector types, HNSW index, BM25 and hybrid search
+```
+
+Findings (26 chunks, bge-small):
+
+- **Vector types.** `FLOAT[384]` (fixed-size `ARRAY`) works with `array_cosine_similarity`
+  and the HNSW index. `FLOAT[]` (`LIST`) needs `list_cosine_similarity` and cannot be indexed.
+  `BLOB` is opaque bytes: no SQL function accepts it, so ranking must happen in Python.
+- **Binding vectors.** Passing a vector as a Python list parameter costs ~200 ms per call;
+  passing it as text and casting in SQL (`?::VARCHAR::FLOAT[384]`) costs ~3 ms.
+- **Chunking.** Counting a question as answered when the top chunk contains the answer
+  phrase: size 30 → 40–50% at top-1, size 60/overlap 15 → 60% (90% in the top 3), size
+  60/overlap 30 → 90%, size 120 → 60–90%. Small chunks cut facts apart; big ones answer more
+  often but send half a document to the model.
+- **Score gap.** Out-of-corpus questions peak at ~0.44–0.49, real questions start at ~0.64.
+  Full support tickets score higher overall (unrelated ones up to ~0.66), hence the 0.7
+  threshold in the graph.
+- **Other text search.** `fts` extension (BM25 via `match_bm25`), `ILIKE`/regex, and fuzzy
+  matching (`jaro_winkler_similarity`, `levenshtein`). BM25 wins on exact terms, vectors on
+  paraphrases; a naive reciprocal-rank fusion of both was not better on this small corpus.
+- **Approximate search.** The `vss` extension adds an HNSW index on `FLOAT[N]` columns; the
+  planner uses it for `ORDER BY array_cosine_distance(...) LIMIT k`.
+
 ## Observability
 
 The ticket workflow (`run_graph.py`, `resume_demo.py`) is traced with
@@ -230,6 +310,7 @@ calls, tokens, cost, trace id) and a timing benchmark per node and model call.
 | `mock_customers.json` | Three customers standing in for a real database: `1001` (pro, 2 recent refunds), `1002` (free, 12-day-old account), `1003` (pro, long-time customer). |
 | `sample_tickets.json` | Five tickets: `T-1001` duplicate charge, `T-1002` stuck CSV export, `T-1003` email change, `T-2001` duplicate charge with a Stripe outage check, `T-2002` error count from today's app log. |
 | `sample_app.log` | App log attached to `T-2002`. |
+| `knowledge_base/` | Five policy documents (accounts, billing, refunds, shipping, warranty) indexed by `run_retrieve.py` and `run_graph.py`. |
 
 To try your own tickets, add entries with `id`, `customer_id` and `text` to
 `sample_tickets.json`, or call the library functions directly.
@@ -245,15 +326,29 @@ Anthropic SDK boundary (`scoutbot.llm.get_client`) with a mock (the `messages_cr
 fixture) and fails any test that would reach the real API. `tests/fakes.py` builds fake
 response blocks.
 
+The retrieval tests (`tests/test_knowledge.py`) use a hand-written keyword embedder instead of
+a model. Exactly one test uses the real fastembed model; it is skipped unless you opt in:
+
+```bash
+SCOUTBOT_REAL_EMBEDDINGS=1 uv run pytest tests/test_knowledge.py
+```
+
+`tests/test_duckdb_store.py` covers the DuckDB store (ranking, incremental re-indexing, model
+check) and `tests/test_graph_knowledge.py` the graph with a fake knowledge base.
+
 ## Project structure
 
 ```
 ├── main.py                # demo: ReAct agent loop + telemetry summary
 ├── run_graph.py           # demo: stream the workflow over all sample tickets
 ├── resume_demo.py         # demo: pause/resume across processes (SQLite) + checkpoint history
+├── run_retrieve.py        # demo: index knowledge_base/ into SQLite and retrieve passages
+├── compare_chunking.py    # experiment: chunk size/overlap vs. retrieval quality (DuckDB)
+├── explore_duckdb.py      # experiment: DuckDB vector types, HNSW, BM25, hybrid search
 ├── read_traces.py         # report: runs and span timings read back from Jaeger
 ├── docker-compose.yml     # local Jaeger v2 (OTLP in, web UI out)
 ├── jaeger/config.yaml     # Jaeger config: Badger on-disk storage in a Docker volume
+├── knowledge_base/        # policy documents for retrieval
 ├── src/scoutbot/
 │   ├── config.py          # model name (read lazily from ANTHROPIC_MODEL), token budget, data paths
 │   ├── llm.py             # get_client(): the single Anthropic SDK boundary
@@ -263,6 +358,8 @@ response blocks.
 │   ├── telemetry.py       # JSONL step logger: log_step / read_log
 │   ├── observability.py   # OpenTelemetry setup, @traced_node, traced_ticket_run, token totals
 │   ├── trace_reader.py    # fetch and summarize traces from Jaeger's API v3
+│   ├── knowledge.py       # retrieval: chunking, cosine, embedder factory, SQLite vector store
+│   ├── duckdb_store.py    # DuckDB vector store with incremental indexing (used by the graph)
 │   ├── tools/             # customer lookup, escalation, triage tool, server tools
 │   ├── agent/             # ReAct loop: models, prompts, dispatch, server results, loop
 │   └── graph/             # LangGraph workflow: state, nodes, builder, checkpoint

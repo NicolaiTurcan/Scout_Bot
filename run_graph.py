@@ -2,7 +2,8 @@
 
 Both ``"updates"`` and ``"custom"`` stream modes are printed, so each node's custom progress
 event appears before that node's state update chunk. High-priority tickets stop at
-``interrupt()`` and their payload is printed.
+``interrupt()`` and their payload is printed. Policy passages from ``knowledge_base/`` are
+retrieved before triage; only new or changed documents are embedded on startup.
 
 Usage:
     uv run python run_graph.py
@@ -20,14 +21,20 @@ from scoutbot import (
     pending_interrupt,
     thread_config,
 )
+from scoutbot.config import DEFAULT_KNOWLEDGE_DUCKDB_PATH
+from scoutbot.duckdb_store import DuckDBKnowledgeBase
+from scoutbot.knowledge import fastembed_embedder, load_corpus
 from scoutbot.observability import flush, setup_observability, traced_ticket_run
 
 
 def main() -> None:
-    """Run every sample ticket through the graph with an in-memory checkpointer."""
+    """Run every sample ticket through the graph with a knowledge base and in-memory checkpoints."""
     load_dotenv()
     setup_observability()
-    graph = build_ticket_graph(checkpointer=InMemorySaver())
+    knowledge_base = DuckDBKnowledgeBase(fastembed_embedder(), DEFAULT_KNOWLEDGE_DUCKDB_PATH)
+    stats = knowledge_base.index(load_corpus())
+    print(f"Knowledge base: {len(knowledge_base)} chunks, {stats}\n")
+    graph = build_ticket_graph(checkpointer=InMemorySaver(), knowledge_base=knowledge_base)
 
     for ticket in load_tickets():
         print(f"=== {ticket['id']}: {ticket['text'][:60]}... ===")
@@ -46,6 +53,7 @@ def main() -> None:
             print(f"  paused with interrupt payload: {payload}")
         print()
 
+    knowledge_base.close()
     flush()
 
 

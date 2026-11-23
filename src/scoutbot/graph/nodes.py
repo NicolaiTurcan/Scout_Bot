@@ -13,10 +13,12 @@ ids, the state update and interrupts on an OpenTelemetry span. Nodes therefore c
 ``print()`` or logging calls.
 """
 import json
+from collections.abc import Callable
 
 from langgraph.types import StreamWriter, interrupt
 
 from ..classifier import triage
+from ..knowledge import KnowledgeStore
 from ..observability import traced_node
 from ..schema import Priority
 from ..tools import look_up_customer
@@ -24,6 +26,7 @@ from .state import TicketState
 
 # Node names, shared by the nodes (in progress events), the router and the graph builder.
 LOOK_UP_CUSTOMER = "look_up_customer"
+RETRIEVE_POLICIES = "retrieve_policies"
 TRIAGE_TICKET = "triage_ticket"
 ESCALATE_TICKET = "escalate_ticket"
 AUTO_RESOLVE = "auto_resolve"
@@ -38,19 +41,30 @@ def noop_writer(_: dict) -> None:
     return None  # noqa: RET501
 
 
+#: Passages scoring below this are dropped. Tuned on sample_tickets.json with bge-small:
+#: unrelated tickets (CSV export) peak at ~0.66, related passages score 0.70+.
+MIN_POLICY_SCORE = 0.7
+
+
 def _ticket_with_customer(state: TicketState) -> str:
-    """Fold the looked-up customer record into the text that :func:`triage` sees.
+    """Fold the customer record and any retrieved policies into the text :func:`triage` sees.
 
     Args:
-        state: State containing ``ticket_text`` and ``customer``.
+        state: State containing ``ticket_text``, ``customer`` and optionally ``policies``.
 
     Returns:
-        The ticket text followed by the customer record as sorted JSON.
+        The ticket text, the customer record as sorted JSON, then cited policy passages.
     """
-    return (
+    text = (
         f"{state['ticket_text']}\n\n"
         f"Customer record: {json.dumps(state['customer'], sort_keys=True)}"
     )
+    if state.get("policies"):
+        passages = "\n".join(
+            f"[{p['source']}#{p['ordinal']}] {p['text']}" for p in state["policies"]
+        )
+        text += f"\n\nRelevant policy passages:\n{passages}"
+    return text
 
 
 @traced_node(LOOK_UP_CUSTOMER)
@@ -77,6 +91,39 @@ def look_up_customer_node(state: TicketState, writer: StreamWriter = noop_writer
         "customer": record,
         "notes": [f"looked up {state['customer_id']}: {outcome}"],
     }
+
+
+def make_retrieve_policies_node(
+    knowledge_base: KnowledgeStore, k: int = 3, min_score: float = MIN_POLICY_SCORE
+) -> Callable[..., dict]:
+    """Build a node that searches the knowledge base with the ticket text.
+
+    Args:
+        knowledge_base: Store to search.
+        k: Maximum passages to retrieve.
+        min_score: Passages scoring below this are dropped.
+
+    Returns:
+        A node function returning ``policies`` and one ``notes`` entry.
+    """
+
+    @traced_node(RETRIEVE_POLICIES)
+    def retrieve_policies_node(state: TicketState, writer: StreamWriter = noop_writer) -> dict:
+        writer(
+            {
+                "node": RETRIEVE_POLICIES,
+                "status": "searching knowledge base",
+                "ticket_id": state["ticket_id"],
+            }
+        )
+        hits = [h for h in knowledge_base.search(state["ticket_text"], k=k) if h.score >= min_score]
+        cited = ", ".join(f"{h.source}#{h.ordinal} ({h.score:.2f})" for h in hits) or "none"
+        return {
+            "policies": [hit._asdict() for hit in hits],
+            "notes": [f"retrieved policies: {cited}"],
+        }
+
+    return retrieve_policies_node
 
 
 @traced_node(TRIAGE_TICKET)
@@ -150,6 +197,7 @@ def escalate_ticket_node(state: TicketState, writer: StreamWriter = noop_writer)
             "ticket_text": state["ticket_text"],
             "customer": state["customer"],
             "triage": state["triage"],
+            "policies": state.get("policies", []),
             "question": ESCALATION_QUESTION,
         }
     )
